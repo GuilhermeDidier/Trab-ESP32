@@ -1,0 +1,364 @@
+"""
+Sistema de Irrigação Inteligente - Integração com OpenWeather API
+FIAP - Fase 2 - Agricultura Digital
+"""
+
+import requests
+import json
+import time
+import pandas as pd
+from datetime import datetime, timedelta
+import serial
+import matplotlib.pyplot as plt
+
+# Configurações da API
+API_KEY = "b1a068f7daf64c487a29fa43acd081c6"  # Chave configurada
+BASE_URL = "http://api.openweathermap.org/data/2.5"
+CITY = "Sao Paulo"
+COUNTRY_CODE = "BR"
+
+# Configurações do Serial (para comunicação com ESP32)
+# SERIAL_PORT = "COM3"  # Windows
+# SERIAL_PORT = "/dev/ttyUSB0"  # Linux
+# BAUD_RATE = 115200
+
+class IrrigationSystem:
+    def __init__(self):
+        self.weather_data = []
+        self.sensor_data = []
+        self.irrigation_log = []
+        
+    def get_current_weather(self):
+        """
+        Obtém dados meteorológicos atuais da API OpenWeather
+        """
+        try:
+            url = f"{BASE_URL}/weather"
+            params = {
+                "q": f"{CITY},{COUNTRY_CODE}",
+                "appid": API_KEY,
+                "units": "metric",
+                "lang": "pt_br"
+            }
+            
+            response = requests.get(url, params=params)
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                weather_info = {
+                    "timestamp": datetime.now().isoformat(),
+                    "temperature": data["main"]["temp"],
+                    "humidity": data["main"]["humidity"],
+                    "pressure": data["main"]["pressure"],
+                    "weather": data["weather"][0]["description"],
+                    "wind_speed": data["wind"]["speed"],
+                    "clouds": data["clouds"]["all"],
+                    "rain_1h": data.get("rain", {}).get("1h", 0)
+                }
+                
+                self.weather_data.append(weather_info)
+                return weather_info
+            else:
+                print(f"Erro na API: {response.status_code}")
+                return None
+                
+        except Exception as e:
+            print(f"Erro ao obter dados meteorológicos: {e}")
+            return None
+    
+    def get_forecast(self):
+        """
+        Obtém previsão do tempo para os próximos 5 dias
+        """
+        try:
+            url = f"{BASE_URL}/forecast"
+            params = {
+                "q": f"{CITY},{COUNTRY_CODE}",
+                "appid": API_KEY,
+                "units": "metric",
+                "lang": "pt_br",
+                "cnt": 40  # 5 dias (8 previsões por dia)
+            }
+            
+            response = requests.get(url, params=params)
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                forecast = []
+                for item in data["list"]:
+                    forecast.append({
+                        "datetime": item["dt_txt"],
+                        "temperature": item["main"]["temp"],
+                        "humidity": item["main"]["humidity"],
+                        "rain_probability": item.get("pop", 0) * 100,
+                        "rain_volume": item.get("rain", {}).get("3h", 0)
+                    })
+                
+                return forecast
+            else:
+                print(f"Erro na API: {response.status_code}")
+                return None
+                
+        except Exception as e:
+            print(f"Erro ao obter previsão: {e}")
+            return None
+    
+    def analyze_irrigation_need(self, soil_moisture, temperature=None):
+        """
+        Analisa a necessidade de irrigação com base nos dados
+        
+        Parameters:
+        - soil_moisture: umidade do solo (%)
+        - temperature: temperatura atual (°C)
+        """
+        weather = self.get_current_weather()
+        forecast = self.get_forecast()
+        
+        # Decisão de irrigação
+        irrigation_needed = False
+        irrigation_duration = 0  # em minutos
+        reason = []
+        
+        # Verificar umidade do solo
+        if soil_moisture < 30:
+            irrigation_needed = True
+            irrigation_duration = 15
+            reason.append("Solo muito seco")
+        elif soil_moisture < 50:
+            irrigation_needed = True
+            irrigation_duration = 10
+            reason.append("Solo moderadamente seco")
+        
+        # Verificar previsão de chuva nas próximas 6 horas
+        if forecast:
+            rain_expected = False
+            for f in forecast[:2]:  # Próximas 6 horas
+                if f["rain_volume"] > 5:  # mais de 5mm de chuva
+                    rain_expected = True
+                    break
+            
+            if rain_expected:
+                irrigation_needed = False
+                reason.append("Chuva prevista nas próximas horas")
+        
+        # Verificar temperatura
+        if weather and weather["temperature"] > 35:
+            irrigation_duration += 5
+            reason.append("Temperatura muito alta")
+        
+        # Verificar umidade do ar
+        if weather and weather["humidity"] < 30:
+            irrigation_duration += 3
+            reason.append("Ar muito seco")
+        
+        decision = {
+            "timestamp": datetime.now().isoformat(),
+            "irrigate": irrigation_needed,
+            "duration_minutes": irrigation_duration,
+            "soil_moisture": soil_moisture,
+            "weather_temp": weather["temperature"] if weather else None,
+            "weather_humidity": weather["humidity"] if weather else None,
+            "rain_last_hour": weather["rain_1h"] if weather else 0,
+            "reasons": reason
+        }
+        
+        self.irrigation_log.append(decision)
+        return decision
+    
+    def simulate_sensor_data(self, hours=24):
+        """
+        Simula dados de sensores para teste
+        """
+        import random
+        
+        for i in range(hours):
+            # Simular variação de umidade do solo
+            base_moisture = 50
+            moisture_variation = random.gauss(0, 15)
+            soil_moisture = max(10, min(90, base_moisture + moisture_variation))
+            
+            # Analisar necessidade de irrigação
+            decision = self.analyze_irrigation_need(soil_moisture)
+            
+            print(f"\n===== Hora {i+1} =====")
+            print(f"Umidade do Solo: {soil_moisture:.1f}%")
+            print(f"Irrigação: {'SIM' if decision['irrigate'] else 'NÃO'}")
+            
+            if decision['irrigate']:
+                print(f"Duração: {decision['duration_minutes']} minutos")
+                print(f"Motivos: {', '.join(decision['reasons'])}")
+            
+            # Simular irrigação afetando a umidade
+            if decision['irrigate']:
+                soil_moisture = min(90, soil_moisture + decision['duration_minutes'] * 2)
+            
+            time.sleep(1)  # Delay para simulação
+    
+    def export_data_to_csv(self):
+        """
+        Exporta dados coletados para CSV (para análise em R)
+        """
+        # Exportar log de irrigação
+        if self.irrigation_log:
+            df_irrigation = pd.DataFrame(self.irrigation_log)
+            df_irrigation.to_csv("irrigation_log.csv", index=False)
+            print("✓ Dados de irrigação exportados para irrigation_log.csv")
+        
+        # Exportar dados meteorológicos
+        if self.weather_data:
+            df_weather = pd.DataFrame(self.weather_data)
+            df_weather.to_csv("weather_data.csv", index=False)
+            print("✓ Dados meteorológicos exportados para weather_data.csv")
+    
+    def visualize_data(self):
+        """
+        Cria visualizações dos dados coletados
+        """
+        if not self.irrigation_log:
+            print("Sem dados para visualizar")
+            return
+        
+        df = pd.DataFrame(self.irrigation_log)
+        
+        # Converter timestamp para datetime
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        
+        # Criar subplots
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        
+        # 1. Umidade do solo ao longo do tempo
+        axes[0, 0].plot(df['timestamp'], df['soil_moisture'], 'b-', linewidth=2)
+        axes[0, 0].axhline(y=30, color='r', linestyle='--', label='Limite inferior')
+        axes[0, 0].axhline(y=70, color='g', linestyle='--', label='Limite superior')
+        axes[0, 0].set_title('Umidade do Solo ao Longo do Tempo')
+        axes[0, 0].set_xlabel('Tempo')
+        axes[0, 0].set_ylabel('Umidade (%)')
+        axes[0, 0].legend()
+        axes[0, 0].grid(True, alpha=0.3)
+        
+        # 2. Duração da irrigação
+        irrigation_events = df[df['irrigate'] == True]
+        if not irrigation_events.empty:
+            axes[0, 1].bar(range(len(irrigation_events)), 
+                          irrigation_events['duration_minutes'], 
+                          color='blue', alpha=0.7)
+            axes[0, 1].set_title('Duração das Irrigações')
+            axes[0, 1].set_xlabel('Evento de Irrigação')
+            axes[0, 1].set_ylabel('Duração (minutos)')
+            axes[0, 1].grid(True, alpha=0.3)
+        
+        # 3. Temperatura vs Umidade do Ar
+        if 'weather_temp' in df.columns:
+            axes[1, 0].scatter(df['weather_temp'], df['weather_humidity'], 
+                             c=df['soil_moisture'], cmap='YlGnBu', s=50)
+            axes[1, 0].set_title('Temperatura vs Umidade do Ar')
+            axes[1, 0].set_xlabel('Temperatura (°C)')
+            axes[1, 0].set_ylabel('Umidade do Ar (%)')
+            cbar = plt.colorbar(axes[1, 0].collections[0], ax=axes[1, 0])
+            cbar.set_label('Umidade do Solo (%)')
+            axes[1, 0].grid(True, alpha=0.3)
+        
+        # 4. Estatísticas de Irrigação
+        total_irrigations = df['irrigate'].sum()
+        total_duration = df['duration_minutes'].sum()
+        avg_soil_moisture = df['soil_moisture'].mean()
+        
+        stats_text = f"""
+        Estatísticas do Período:
+        
+        Total de Irrigações: {total_irrigations}
+        Tempo Total de Irrigação: {total_duration} min
+        Umidade Média do Solo: {avg_soil_moisture:.1f}%
+        Taxa de Irrigação: {(total_irrigations/len(df)*100):.1f}%
+        """
+        
+        axes[1, 1].text(0.1, 0.5, stats_text, fontsize=12, 
+                       verticalalignment='center',
+                       bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
+        axes[1, 1].axis('off')
+        
+        plt.suptitle('Dashboard - Sistema de Irrigação Inteligente', fontsize=16)
+        plt.tight_layout()
+        plt.savefig('irrigation_dashboard.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        print("✓ Dashboard salvo como irrigation_dashboard.png")
+
+def main():
+    """
+    Função principal
+    """
+    print("=" * 50)
+    print("SISTEMA DE IRRIGAÇÃO INTELIGENTE - FIAP")
+    print("Integração com OpenWeather API")
+    print("=" * 50)
+    
+    # Criar instância do sistema
+    system = IrrigationSystem()
+    
+    while True:
+        print("\n--- MENU ---")
+        print("1. Obter dados meteorológicos atuais")
+        print("2. Obter previsão do tempo (5 dias)")
+        print("3. Simular sistema (24 horas)")
+        print("4. Exportar dados para CSV")
+        print("5. Visualizar dashboard")
+        print("6. Análise de irrigação manual")
+        print("0. Sair")
+        
+        choice = input("\nEscolha uma opção: ")
+        
+        if choice == "1":
+            weather = system.get_current_weather()
+            if weather:
+                print(f"\n🌡️ Temperatura: {weather['temperature']}°C")
+                print(f"💧 Umidade: {weather['humidity']}%")
+                print(f"🌧️ Chuva (última hora): {weather['rain_1h']}mm")
+                print(f"💨 Vento: {weather['wind_speed']}m/s")
+                print(f"☁️ Nuvens: {weather['clouds']}%")
+                print(f"📝 Condição: {weather['weather']}")
+        
+        elif choice == "2":
+            forecast = system.get_forecast()
+            if forecast:
+                print("\n📅 PREVISÃO PARA OS PRÓXIMOS 5 DIAS:")
+                for i, f in enumerate(forecast[:8]):  # Mostrar próximas 24h
+                    print(f"{f['datetime']}: {f['temperature']:.1f}°C, "
+                          f"Chuva: {f['rain_probability']:.0f}% ({f['rain_volume']}mm)")
+        
+        elif choice == "3":
+            print("\n🔄 Iniciando simulação de 24 horas...")
+            system.simulate_sensor_data(24)
+        
+        elif choice == "4":
+            system.export_data_to_csv()
+        
+        elif choice == "5":
+            system.visualize_data()
+        
+        elif choice == "6":
+            try:
+                moisture = float(input("Digite a umidade do solo (%): "))
+                decision = system.analyze_irrigation_need(moisture)
+                
+                print(f"\n--- ANÁLISE DE IRRIGAÇÃO ---")
+                print(f"Decisão: {'IRRIGAR' if decision['irrigate'] else 'NÃO IRRIGAR'}")
+                if decision['irrigate']:
+                    print(f"Duração recomendada: {decision['duration_minutes']} minutos")
+                print(f"Motivos: {', '.join(decision['reasons'])}")
+                
+            except ValueError:
+                print("❌ Valor inválido!")
+        
+        elif choice == "0":
+            print("\n👋 Encerrando sistema...")
+            system.export_data_to_csv()
+            break
+        
+        else:
+            print("❌ Opção inválida!")
+
+if __name__ == "__main__":
+    main()
